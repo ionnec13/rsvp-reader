@@ -8,13 +8,22 @@
   <!-- DOCX -> text -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script>
 
-  <!-- PDF.js (local, same-origin for iOS Safari) -->
-<script src="./vendor/pdfjs/pdf.min.js"></script>
+  <!-- PDF.js (CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 <script>
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "./vendor/pdfjs/pdf.worker.min.js";
+  // Guard in case pdf.js fails to load (prevents uncaught ReferenceError)
+  if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+  } else {
+    // If pdf.js didn't load, show a helpful status message once the DOM exists
+    window.addEventListener('DOMContentLoaded', () => {
+      const s = document.getElementById('status');
+      if (s) s.textContent = 'PDF support not available (pdf.js failed to load).';
+    });
+    console.error('pdf.js not loaded — check network or use a local copy at vendor/pdfjs/');
+  }
 </script>
-
   <style>
     :root{
       --bg:#000;
