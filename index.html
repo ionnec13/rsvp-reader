@@ -12,6 +12,9 @@ cat > index.html <<'HTML'
   <!-- PDF.js (local, same-origin for iOS Safari) -->
   <script src="./vendor/pdfjs/pdf.min.js"></script>
   <script>
+  alert("pdfjsLib is " + (typeof window.pdfjsLib));
+</script>
+  <script>
     // PDF.js worker (local)
     pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.min.js";
   </script>
