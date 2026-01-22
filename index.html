@@ -1,0 +1,469 @@
+cat > index.html <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>RSVP Speed Reader</title>
+
+  <!-- DOCX -> text -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script>
+
+  <!-- PDF.js (local, same-origin for iOS Safari) -->
+  <script src="./vendor/pdfjs/pdf.min.js"></script>
+  <script>
+    // PDF.js worker (local)
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.min.js";
+  </script>
+
+  <style>
+    :root{
+      --bg:#000;
+      --fg:#fff;
+      --accent:#ff3b30;
+      --ui:#111;
+      --ui2:#1a1a1a;
+      --muted:#bdbdbd;
+    }
+    html,body{height:100%; margin:0; background:var(--bg); color:var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;}
+    .app{
+      height:100%;
+      display:flex;
+      flex-direction:column;
+      padding: env(safe-area-inset-top) 12px env(safe-area-inset-bottom) 12px;
+      box-sizing:border-box;
+      gap:12px;
+    }
+    .topbar{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      background:var(--ui);
+      border:1px solid #222;
+      border-radius:12px;
+      padding:12px;
+    }
+    .row{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    label{font-size:13px; color:var(--muted);}
+    input[type="range"]{width: 180px;}
+    .btn{
+      appearance:none;
+      border:1px solid #2a2a2a;
+      background:var(--ui2);
+      color:var(--fg);
+      padding:10px 12px;
+      border-radius:10px;
+      font-size:14px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .btn:active{transform: translateY(1px);}
+    .btn.primary{border-color:#3a3a3a;}
+    .file{
+      display:flex; flex:1; gap:10px; align-items:center;
+    }
+    .status{
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.2;
+      flex:1;
+      min-width: 220px;
+      word-break: break-word;
+    }
+    .stage{
+      position:relative;
+      flex:1;
+      border-radius:16px;
+      border:1px solid #222;
+      background:#000;
+      overflow:hidden;
+    }
+    .wordLayer{
+      position:absolute;
+      left:0; top:0; right:0; bottom:0;
+    }
+    .word{
+      position:absolute;
+      left:0;
+      top:0;
+      white-space:nowrap;
+      font-family: "Times New Roman", Times, serif;
+      font-weight:400;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .orp{color:var(--accent);}
+    .help{
+      font-size:12px; color:var(--muted);
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="row">
+        <div class="file">
+          <input id="fileInput" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+          <button class="btn" id="btnClear">Clear</button>
+        </div>
+        <button class="btn primary" id="btnPlay">Play</button>
+        <button class="btn" id="btnPause" disabled>Pause</button>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>WPM: <span id="wpmLabel">300</span></label><br/>
+          <input id="wpm" type="range" min="100" max="900" step="10" value="300"/>
+        </div>
+        <div>
+          <label>Font size: <span id="fsLabel">36</span></label><br/>
+          <input id="fontSize" type="range" min="18" max="60" step="1" value="36"/>
+        </div>
+        <div>
+          <label>Micro-pauses</label><br/>
+          <select id="pauseProfile" class="btn" style="padding:8px 10px;">
+            <option value="normal" selected>Normal</option>
+            <option value="light">Light</option>
+            <option value="strong">Strong</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="status" id="status">Choose a PDF or DOCX from the Files app.</div>
+      <div class="help">
+        Tip: add to home screen for a fullscreen feel. Your files are processed on-device only.
+      </div>
+    </div>
+
+    <div class="stage" id="stage" aria-label="RSVP display">
+      <div class="wordLayer" id="wordLayer"></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  let words = [];
+  let idx = 0;
+  let playing = false;
+  let timer = null;
+  let fileKey = null;
+
+  const fileInput = document.getElementById('fileInput');
+  const btnPlay = document.getElementById('btnPlay');
+  const btnPause = document.getElementById('btnPause');
+  const btnClear = document.getElementById('btnClear');
+
+  const wpm = document.getElementById('wpm');
+  const wpmLabel = document.getElementById('wpmLabel');
+  const fontSize = document.getElementById('fontSize');
+  const fsLabel = document.getElementById('fsLabel');
+  const pauseProfile = document.getElementById('pauseProfile');
+
+  const status = document.getElementById('status');
+  const stage = document.getElementById('stage');
+  const wordLayer = document.getElementById('wordLayer');
+
+  const wordEl = document.createElement('div');
+  wordEl.className = 'word';
+  wordLayer.appendChild(wordEl);
+
+  const measureCanvas = document.createElement('canvas');
+  const ctx = measureCanvas.getContext('2d');
+
+  function getAnchorPoint() {
+    const r = stage.getBoundingClientRect();
+    return { x: r.width * 0.5, y: r.height * 0.44 };
+  }
+
+  function cleanAndTokenize(text) {
+    const normalized = text
+      .replace(/\u00A0/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    if (!normalized) return [];
+    return normalized.split(/\s+/).filter(Boolean);
+  }
+
+  function orpIndexForWord(word) {
+    const core = word.replace(/^[\(\[\{“"‘']+|[\)\]\}”"’',;:\.!?]+$/g, '');
+    const len = Math.max(core.length, 1);
+    let orp;
+    if (len <= 1) orp = 0;
+    else if (len <= 5) orp = 1;
+    else if (len <= 9) orp = 2;
+    else if (len <= 13) orp = 3;
+    else orp = 4;
+    const start = word.indexOf(core);
+    return Math.min(start + orp, word.length - 1);
+  }
+
+  function punctuationDelayMultiplier(word) {
+    if (pauseProfile.value === 'off') return 1.0;
+    const profile = pauseProfile.value;
+    const mults = {
+      light:  { comma: 1.12, end: 1.35, colon: 1.18, dash: 1.12 },
+      normal: { comma: 1.18, end: 1.60, colon: 1.25, dash: 1.15 },
+      strong: { comma: 1.28, end: 2.00, colon: 1.40, dash: 1.22 },
+    }[profile] || { comma: 1.18, end: 1.60, colon: 1.25, dash: 1.15 };
+
+    const w = word.trim();
+    if (/[.!?][)”"’']*$/.test(w)) return mults.end;
+    if (/[,][)”"’']*$/.test(w)) return mults.comma;
+    if (/[;:][)”"’']*$/.test(w)) return mults.colon;
+    if (/[—–-][)”"’']*$/.test(w)) return mults.dash;
+    return 1.0;
+  }
+
+  function setFontMetrics() {
+    const fs = Number(fontSize.value);
+    wordEl.style.fontSize = fs + 'px';
+    ctx.font = `${fs}px "Times New Roman", Times, serif`;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, (c) => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'
+    }[c]));
+  }
+
+  function renderWord(word) {
+    if (!word) { wordEl.innerHTML = ''; return; }
+    setFontMetrics();
+    const fs = Number(fontSize.value);
+    const orpIdx = orpIndexForWord(word);
+    const pre = word.slice(0, orpIdx);
+    const ch  = word.slice(orpIdx, orpIdx + 1);
+    const post= word.slice(orpIdx + 1);
+    wordEl.innerHTML = `${escapeHtml(pre)}<span class="orp">${escapeHtml(ch)}</span>${escapeHtml(post)}`;
+
+    const {x, y} = getAnchorPoint();
+    const preWidth = ctx.measureText(pre).width;
+    const left = x - preWidth;
+    const top  = y - fs * 0.55;
+    wordEl.style.transform = `translate(${left}px, ${top}px)`;
+  }
+
+  function baseIntervalMs() {
+    return 60000 / Number(wpm.value);
+  }
+
+  function computeFileKey(file) {
+    return [file.name, file.size, file.lastModified].join('|');
+  }
+
+  function saveProgress() {
+    if (!fileKey) return;
+    const payload = {
+      idx,
+      wpm: Number(wpm.value),
+      fontSize: Number(fontSize.value),
+      pauseProfile: pauseProfile.value,
+      updatedAt: Date.now()
+    };
+    localStorage.setItem('rsvp.progress.' + fileKey, JSON.stringify(payload));
+  }
+
+  function loadProgress() {
+    if (!fileKey) return;
+    const raw = localStorage.getItem('rsvp.progress.' + fileKey);
+    if (!raw) return;
+    try {
+      const payload = JSON.parse(raw);
+      if (typeof payload.idx === 'number') idx = Math.min(payload.idx, Math.max(words.length - 1, 0));
+      if (payload.wpm) wpm.value = payload.wpm;
+      if (payload.fontSize) fontSize.value = payload.fontSize;
+      if (payload.pauseProfile) pauseProfile.value = payload.pauseProfile;
+      syncLabels();
+    } catch {}
+  }
+
+  function syncLabels() {
+    wpmLabel.textContent = wpm.value;
+    fsLabel.textContent = fontSize.value;
+    setFontMetrics();
+    if (words.length) renderWord(words[idx]);
+  }
+
+  function setStatus(msg) { status.textContent = msg; }
+  function setButtons() {
+    btnPlay.disabled = !words.length || playing;
+    btnPause.disabled = !playing;
+  }
+  function stopTimer() { if (timer) { clearTimeout(timer); timer = null; } }
+
+  function step() {
+    if (!playing || !words.length) return;
+    renderWord(words[idx]);
+    saveProgress();
+    const delay = baseIntervalMs() * punctuationDelayMultiplier(words[idx]);
+    idx++;
+    if (idx >= words.length) {
+      playing = false;
+      idx = words.length - 1;
+      setButtons();
+      setStatus(`Done. (${words.length} words)`);
+      return;
+    }
+    timer = setTimeout(step, delay);
+  }
+
+  function play() {
+    if (!words.length || playing) return;
+    playing = true;
+    setButtons();
+    setStatus(`Playing… word ${idx + 1} / ${words.length}`);
+    stopTimer();
+    step();
+  }
+
+  function pause() {
+    playing = false;
+    stopTimer();
+    setButtons();
+    saveProgress();
+    setStatus(`Paused. word ${idx + 1} / ${words.length}`);
+  }
+
+  function clearAll() {
+    pause();
+    words = [];
+    idx = 0;
+    fileKey = null;
+    wordEl.innerHTML = '';
+    fileInput.value = '';
+    setButtons();
+    setStatus('Choose a PDF or DOCX from the Files app.');
+  }
+
+  async function parseDocx(file) {
+    const buf = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer: buf });
+    return result.value || '';
+  }
+
+  async function parsePdf(file) {
+    const buf = await file.arrayBuffer();
+    const loadingTask = pdfjsLib.getDocument({ data: buf });
+    const pdf = await loadingTask.promise;
+
+    let out = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const items = content.items
+        .filter(it => it.str && it.str.trim().length)
+        .map(it => {
+          const t = it.transform;
+          return { s: it.str, x: t[4], y: t[5], w: it.width || 0 };
+        });
+
+      const yTol = 2.0;
+      items.sort((a,b) => (b.y - a.y) || (a.x - b.x));
+
+      const lines = [];
+      for (const it of items) {
+        let line = lines.find(L => Math.abs(L.y - it.y) <= yTol);
+        if (!line) { line = { y: it.y, items: [] }; lines.push(line); }
+        line.items.push(it);
+      }
+
+      lines.sort((a,b) => b.y - a.y);
+      for (const L of lines) {
+        L.items.sort((a,b) => a.x - b.x);
+        out.push(smartJoinPdfLine(L.items.map(i => i.s)));
+      }
+      out.push('\n');
+    }
+    return out.join('\n');
+  }
+
+  function smartJoinPdfLine(parts) {
+    let s = '';
+    for (const p of parts) {
+      if (!s) { s = p; continue; }
+      const noSpaceBefore = /^[\)\]\}\.,;:!?%”"’]/.test(p);
+      const noSpaceAfter = /[(\[\{“"‘]$/.test(s);
+      if (noSpaceBefore || noSpaceAfter) s += p;
+      else s += ' ' + p;
+    }
+    return s;
+  }
+
+  async function handleFile(file) {
+    stopTimer();
+    playing = false;
+    setButtons();
+
+    fileKey = computeFileKey(file);
+    setStatus(`Loading ${file.name}…`);
+
+    try {
+      let text = '';
+      if (file.name.toLowerCase().endsWith('.docx')) {
+        text = await parseDocx(file);
+      } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        text = await parsePdf(file);
+      } else {
+        throw new Error('Unsupported file type. Please choose a PDF or DOCX.');
+      }
+
+      words = cleanAndTokenize(text);
+      idx = 0;
+      loadProgress();
+
+      if (!words.length) {
+        setStatus('No text found in this file.');
+        setButtons();
+        renderWord('');
+        return;
+      }
+
+      setStatus(`Loaded: ${file.name} — ${words.length} words. Ready.`);
+      renderWord(words[idx]);
+      setButtons();
+    } catch (err) {
+      console.error(err);
+      setStatus('Error: ' + (err?.message || String(err)));
+      words = [];
+      idx = 0;
+      setButtons();
+    }
+  }
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) handleFile(file);
+  });
+
+  document.getElementById('btnPlay').addEventListener('click', play);
+  document.getElementById('btnPause').addEventListener('click', pause);
+  document.getElementById('btnClear').addEventListener('click', clearAll);
+
+  wpm.addEventListener('input', () => { syncLabels(); saveProgress(); });
+  fontSize.addEventListener('input', () => { syncLabels(); saveProgress(); });
+  pauseProfile.addEventListener('change', () => { saveProgress(); });
+
+  stage.addEventListener('click', () => {
+    if (!words.length) return;
+    if (playing) pause(); else play();
+  });
+
+  window.addEventListener('resize', () => {
+    if (words.length) renderWord(words[idx]);
+  });
+
+  syncLabels();
+  setButtons();
+})();
+</script>
+</body>
+</html>
+HTML
